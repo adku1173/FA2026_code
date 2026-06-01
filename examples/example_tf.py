@@ -15,7 +15,7 @@ Run:
 import numpy as np
 import tensorflow as tf
 
-from fa2026.generator_tf import make_tf_dataset
+from fa2026.generators.generator_tf import make_tf_dataset
 from fa2026.physical import build_sensing_matrix
 
 # ── Sensing matrix ───────────────────────────────────────────────────────────

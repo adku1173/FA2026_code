@@ -17,7 +17,7 @@ Usage
 import numpy as np
 import tensorflow as tf
 
-from .generator import CMFDataGenerator
+from ..generators.generator import CMFDataGenerator
 
 
 def make_tf_dataset(
