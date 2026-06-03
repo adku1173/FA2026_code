@@ -1,0 +1,9 @@
+name: fa2026
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - numpy
+  - acoular
+prefix: "${CONDA_ENV_PREFIX:-./.conda/envs/fa2026}"

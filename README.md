@@ -4,6 +4,8 @@ Source code for the Forum Acusticum 2026 paper.
 
 ## Setup
 
+### Using uv (recommended)
+
 ```bash
 uv sync                              # install base deps + dev tools
 uv sync --extra torch                # add PyTorch
@@ -11,10 +13,39 @@ uv sync --extra tf                   # add TensorFlow
 uv sync --extra torch --extra tf     # add both
 ```
 
+### Using conda
+
+For users who prefer conda, environment files are provided:
+
+```bash
+# Base environment (numpy + acoular)
+conda env create -f environment.yml
+conda activate fa2026
+
+# With PyTorch
+conda env create -f environment-torch.yml
+conda activate fa2026-torch
+
+# With TensorFlow
+conda env create -f environment-tf.yml
+conda activate fa2026-tf
+```
+
+> **Note for conda users**: After creating the environment, install the package in development mode:
+> ```bash
+> pip install -e .
+> ```
+
 ## Run tests
 
 ```bash
 uv run pytest
+```
+
+Or with conda:
+```bash
+conda activate fa2026
+pytest
 ```
 
 ## Run the examples

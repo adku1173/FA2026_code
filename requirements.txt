@@ -1,0 +1,7 @@
+# Core dependencies
+numpy
+acoular
+
+# Optional dependencies (uncomment as needed)
+# torch
+# tensorflow

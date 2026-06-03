@@ -1,0 +1,10 @@
+name: fa2026-torch
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - numpy
+  - acoular
+  - pytorch
+prefix: "${CONDA_ENV_PREFIX:-./.conda/envs/fa2026-torch}"
