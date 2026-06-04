@@ -5,7 +5,8 @@ This module provides PyTorch implementations of:
     - FISTA: Fast Iterative Shrinkage-Thresholding Algorithm
 
 Both solve the LASSO problem:
-    min_x 1/2 ||y - A x||_2^2 + λ ||x||_1
+    min_x 1/(2 m) ||y - A x||_2^2 + λ ||x||_1,
+    where m is the length of y / number of measurements.
 
 With support for:
     - Column normalization of A
@@ -27,7 +28,11 @@ class ISTA(nn.Module):
     Iterative Shrinkage-Thresholding Algorithm (ISTA) for LASSO.
 
     Solves the objective:
-        min_x 1/2 ||y - A x||_2^2 + λ ||x||_1
+        min_x 1/(2 m) ||y - A x||_2^2 + λ ||x||_1
+
+    The implementation keeps the ISTA/FISTA step written with the unnormalized
+    residual gradient ``A.T @ (y - A x)``. To solve the normalized objective
+    above, the shrinkage threshold is therefore ``theta = gamma * λ * m``.
 
     Args:
         norm_A (bool): if True, normalize the columns of ``A``
@@ -266,7 +271,14 @@ class ISTA(nn.Module):
             raise ValueError(missing_message)
         return lam_value
 
-    def _resolve_gamma_theta(self, lam_value, gamma, batch_size, A_tensor):
+    def _resolve_gamma_theta(
+        self,
+        lam_value,
+        gamma,
+        batch_size,
+        A_tensor,
+        n_measurements,
+    ):
         """Resolve step size and shrinkage threshold for fixed-step solvers."""
         gamma_value = gamma
         if gamma_value is None:
@@ -278,7 +290,11 @@ class ISTA(nn.Module):
             reference_tensor=A_tensor,
         )
 
-        theta_value = lam_value * gamma_value
+        # Paper convention without the exponential reparameterization:
+        #   1 / (2 m) * ||y - A x||_2^2 + lam * ||x||_1
+        # The step still uses the unnormalized gradient A.T @ (y - A x), so the
+        # equivalent proximal threshold is gamma * lam * m.
+        theta_value = lam_value * gamma_value * n_measurements
         theta_value = self._resolve_batch_param(
             theta_value,
             batch_size,
@@ -292,7 +308,11 @@ class ISTA(nn.Module):
         y, x0, A_tensor, l2_norms, batch_size = self._prepare_forward_inputs(y, x0, A)
         lam_value = self._resolve_lam_value(lam, batch_size, A_tensor)
         gamma_value, theta_value = self._resolve_gamma_theta(
-            lam_value, gamma, batch_size, A_tensor
+            lam_value,
+            gamma,
+            batch_size,
+            A_tensor,
+            n_measurements=y.shape[1],
         )
         return y, x0, A_tensor, l2_norms, gamma_value, theta_value
 
@@ -384,7 +404,7 @@ class FISTA(ISTA):
     Fast Iterative Shrinkage-Thresholding Algorithm (FISTA) for LASSO.
 
     Solves the objective:
-        min_x 1/2 ||y - A x||_2^2 + λ ||x||_1
+        min_x 1/(2 m) ||y - A x||_2^2 + λ ||x||_1
 
     Uses Nesterov momentum acceleration for faster convergence than ISTA.
     """
@@ -441,7 +461,7 @@ class SFISTA(FISTA):
     for unfolded sparse coding". Ablin et al.'s SLISTA unfolds ISTA with one
     learned step size per layer and no acceleration:
 
-        z_{k+1} = ST(z_k - gamma_k A.T @ (A @ z_k - y), lambda * gamma_k)
+        z_{k+1} = ST(z_k - gamma_k A.T @ (A @ z_k - y), lambda * gamma_k * m)
 
     This implementation keeps the learned per-layer step sizes and tied
     thresholds from SLISTA, but deliberately adapts the architecture by:
@@ -455,10 +475,10 @@ class SFISTA(FISTA):
     It therefore solves an unfolded, momentum-accelerated, optionally
     non-negative sparse-coding variant of:
 
-        min_x 1/2 ||y - A x||_2^2 + λ ||x||_1
+        min_x 1/(2 m) ||y - A x||_2^2 + λ ||x||_1
 
     At iteration ``k``, ``gamma[k]`` is a trainable scalar step size and the
-    threshold is computed as ``theta_k = lam * gamma[k]``. The step parameters
+    threshold is computed as ``theta_k = lam * gamma[k] * m``. The step parameters
     are stored directly and are not positivity-constrained by this class; callers
     should initialize/train them accordingly if positive steps are required.
 
@@ -494,8 +514,9 @@ class SFISTA(FISTA):
             raise ValueError("gamma_init must be provided for SFISTA")
         self.n_iterations = n_iterations
         self.gamma = nn.Parameter(torch.full((n_iterations,), float(gamma_init)))
-        # Temporary storage for lam_value during forward pass
+        # Temporary storage for lam_value and measurement count during forward pass
         self._current_lam_value = None
+        self._current_n_measurements = None
 
     def _setup_forward(self, y, x0, A, lam, gamma):
         """Prepare inputs and validate SFISTA-specific constraints.
@@ -510,12 +531,15 @@ class SFISTA(FISTA):
             )
 
         y, x0, A_tensor, l2_norms, batch_size = self._prepare_forward_inputs(y, x0, A)
-        self._current_lam_value = self._resolve_lam_value(
+        # Store forward-pass temporaries without registering them as module
+        # parameters if ``lam`` is an ``nn.Parameter`` owned by the caller.
+        self.__dict__["_current_lam_value"] = self._resolve_lam_value(
             lam,
             batch_size,
             A_tensor,
             missing_message="lam must be provided",
         )
+        self.__dict__["_current_n_measurements"] = y.shape[1]
 
         # Ensure gamma is on the same device and dtype as A_tensor
         if self.gamma.device != A_tensor.device or self.gamma.dtype != A_tensor.dtype:
@@ -530,13 +554,13 @@ class SFISTA(FISTA):
     def _step_params(self, k):
         """Return SFISTA trainable step size and matching threshold."""
         gamma_k = self.gamma[k]
-        theta_k = self._current_lam_value * gamma_k
+        theta_k = self._current_lam_value * gamma_k * self._current_n_measurements
         return gamma_k, theta_k
 
     def _iterate(self, y, x0, A_tensor, gamma_value, theta_value, t):
         """Run SFISTA iterations with trainable per-iteration step sizes.
         
-        Uses gamma[k] at iteration k and computes theta_k = lam * gamma[k].
+        Uses gamma[k] at iteration k and computes theta_k = lam * gamma[k] * m.
         """
         if t > self.n_iterations:
             raise ValueError(

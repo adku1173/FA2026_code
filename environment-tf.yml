@@ -2,9 +2,13 @@ name: fa2026-tf
 channels:
   - conda-forge
   - defaults
+  - acoular
 dependencies:
-  - python>=3.9
+  - python>=3.10,<3.13
+  - pip
   - numpy
   - acoular
+  - ipykernel
+  - pytest
+  - matplotlib
   - tensorflow
-prefix: "${CONDA_ENV_PREFIX:-./.conda/envs/fa2026-tf}"

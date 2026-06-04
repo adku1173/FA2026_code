@@ -2,9 +2,13 @@ name: fa2026-torch
 channels:
   - conda-forge
   - defaults
+  - acoular
 dependencies:
   - python>=3.9
+  - pip
   - numpy
   - acoular
+  - ipykernel
+  - pytest
+  - matplotlib
   - pytorch
-prefix: "${CONDA_ENV_PREFIX:-./.conda/envs/fa2026-torch}"

@@ -2,8 +2,12 @@ name: fa2026
 channels:
   - conda-forge
   - defaults
+  - acoular
 dependencies:
   - python>=3.9
+  - pip
   - numpy
   - acoular
-prefix: "${CONDA_ENV_PREFIX:-./.conda/envs/fa2026}"
+  - ipykernel
+  - pytest
+  - matplotlib
