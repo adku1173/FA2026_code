@@ -236,8 +236,8 @@ class ISTA(nn.Module):
         x = shrink_func(x, theta)
         return x
 
-    def _setup_forward(self, y, x0, A, lam, gamma):
-        """Prepare and validate inputs, resolve all solver parameters."""
+    def _prepare_forward_inputs(self, y, x0, A):
+        """Prepare tensors shared by all ISTA variants."""
         if y.ndim == 1:
             y = y.unsqueeze(0)
         if x0 is not None and x0.ndim == 1:
@@ -250,7 +250,24 @@ class ISTA(nn.Module):
             x0 = x0.to(device=A_tensor.device, dtype=A_tensor.dtype)
 
         self._validate_shapes(y, x0, A_tensor)
+        return y, x0, A_tensor, l2_norms, batch_size
 
+    def _resolve_lam_value(
+        self, lam, batch_size, A_tensor, missing_message="lam must be provided."
+    ):
+        """Resolve regularization strength for scalar or per-batch input."""
+        lam_value = self._resolve_batch_param(
+            lam,
+            batch_size,
+            name="lam",
+            reference_tensor=A_tensor,
+        )
+        if lam_value is None:
+            raise ValueError(missing_message)
+        return lam_value
+
+    def _resolve_gamma_theta(self, lam_value, gamma, batch_size, A_tensor):
+        """Resolve step size and shrinkage threshold for fixed-step solvers."""
         gamma_value = gamma
         if gamma_value is None:
             gamma_value = self._default_gamma_from_A(A_tensor)
@@ -261,15 +278,6 @@ class ISTA(nn.Module):
             reference_tensor=A_tensor,
         )
 
-        lam_value = self._resolve_batch_param(
-            lam,
-            batch_size,
-            name="lam",
-            reference_tensor=A_tensor,
-        )
-
-        if lam_value is None:
-            raise ValueError("lam must be provided.")
         theta_value = lam_value * gamma_value
         theta_value = self._resolve_batch_param(
             theta_value,
@@ -277,39 +285,77 @@ class ISTA(nn.Module):
             name="theta",
             reference_tensor=A_tensor,
         )
+        return gamma_value, theta_value
 
+    def _setup_forward(self, y, x0, A, lam, gamma):
+        """Prepare and validate inputs, resolve all solver parameters."""
+        y, x0, A_tensor, l2_norms, batch_size = self._prepare_forward_inputs(y, x0, A)
+        lam_value = self._resolve_lam_value(lam, batch_size, A_tensor)
+        gamma_value, theta_value = self._resolve_gamma_theta(
+            lam_value, gamma, batch_size, A_tensor
+        )
         return y, x0, A_tensor, l2_norms, gamma_value, theta_value
+
+    def _start_iterations(self, y):
+        """Initialize callback-visible solver state."""
+        self.y = y
+        self.stop = False
+
+    def _on_iteration_begin(self, k, x):
+        """Run begin callbacks and report whether iteration should continue."""
+        self.iter = k
+        for cb in self.callbacks:
+            cb.on_step_begin(self, x)
+        return not self.stop
+
+    def _on_iteration_end(self, x, gamma, theta, A_tensor, y):
+        """Run end callbacks and report whether iteration should continue."""
+        for cb in self.callbacks:
+            cb.on_step_end(self, x, gamma=gamma, theta=theta, A=A_tensor, y=y)
+        return not self.stop
+
+    def _run_iterations(self, y, A_tensor, t, x, step_fn):
+        """Run shared iteration loop with callback and stop handling."""
+        self._start_iterations(y)
+        for k in range(t):
+            if not self._on_iteration_begin(k, x):
+                break
+            x, gamma_k, theta_k = step_fn(k, x)
+            if not self._on_iteration_end(x, gamma_k, theta_k, A_tensor, y):
+                break
+        return x
+
+    def _iteration_functions(self):
+        """Resolve gradient and shrinkage functions once per solve."""
+        return self.get_grad_func(), self.get_shrink_func()
+
+    def _init_solver_vector(self, y, x0, A_tensor):
+        """Initialize one solution-shaped vector."""
+        return self._init_x(
+            b=y.shape[0],
+            n=A_tensor.shape[-1],
+            x0=x0,
+            reference_tensor=A_tensor,
+        )
 
     def _iterate(self, y, x0, A_tensor, gamma_value, theta_value, t):
         """Run ISTA iterations and return the solution."""
-        batch_size = y.shape[0]
-        n = A_tensor.shape[-1]
-        grad_func = self.get_grad_func()
-        shrink_func = self.get_shrink_func()
-        x = self._init_x(b=batch_size, n=n, x0=x0, reference_tensor=A_tensor)
-        self.y = y
-        self.stop = False
-        callbacks = self.callbacks
-        for k in range(t):
-            self.iter = k
-            if callbacks:
-                for cb in callbacks:
-                    cb.on_step_begin(self, x)
-            if self.stop:
-                break
-            x = self.step(
-                y, x, A_tensor, shrink_func, grad_func,
-                gamma=gamma_value, theta=theta_value
+        grad_func, shrink_func = self._iteration_functions()
+        x = self._init_solver_vector(y, x0, A_tensor)
+
+        def step_fn(_k, x_current):
+            x_next = self.step(
+                y,
+                x_current,
+                A_tensor,
+                shrink_func,
+                grad_func,
+                gamma=gamma_value,
+                theta=theta_value,
             )
-            if callbacks:
-                for cb in callbacks:
-                    cb.on_step_end(
-                        self, x, gamma=gamma_value, theta=theta_value,
-                        A=A_tensor, y=y
-                    )
-            if self.stop:
-                break
-        return x
+            return x_next, gamma_value, theta_value
+
+        return self._run_iterations(y, A_tensor, t, x, step_fn)
 
     def forward(self, y, x0=None, t=1, A=None, lam=None, gamma=None):
         """
@@ -352,44 +398,155 @@ class FISTA(ISTA):
         z_next = x_next + (tk - 1.0) / t_next * (x_next - x)
         return t_next, z_next, x_next
 
-    def _iterate(self, y, x0, A_tensor, gamma_value, theta_value, t):
-        """Run FISTA iterations with Nesterov momentum and return the solution."""
-        batch_size = y.shape[0]
-        n = A_tensor.shape[-1]
-        grad_func = self.get_grad_func()
-        shrink_func = self.get_shrink_func()
-        x = self._init_x(b=batch_size, n=n, x0=x0, reference_tensor=A_tensor)
-        z = self._init_x(b=batch_size, n=n, x0=x0, reference_tensor=A_tensor)
+    def _iterate_accelerated(self, y, x0, A_tensor, t, step_params_fn):
+        """Run FISTA-style iterations with caller-provided step parameters."""
+        grad_func, shrink_func = self._iteration_functions()
+        x = self._init_solver_vector(y, x0, A_tensor)
+        z = self._init_solver_vector(y, x0, A_tensor)
         tk = 1.0
 
-        self.y = y
-        self.stop = False
-        callbacks = self.callbacks
-
-        for k in range(t):
-            self.iter = k
-            if callbacks:
-                for cb in callbacks:
-                    cb.on_step_begin(self, x)
-            if self.stop:
-                break
-
-            # ISTA step on momentum variable z
+        def step_fn(k, x_current):
+            nonlocal z, tk
+            gamma_k, theta_k = step_params_fn(k)
             x_next = self.step(
-                y, z, A_tensor, shrink_func, grad_func,
-                gamma=gamma_value, theta=theta_value
+                y,
+                z,
+                A_tensor,
+                shrink_func,
+                grad_func,
+                gamma=gamma_k,
+                theta=theta_k,
+            )
+            tk, z, x_updated = self._nesterov_momentum(tk, x_current, x_next)
+            return x_updated, gamma_k, theta_k
+
+        return self._run_iterations(y, A_tensor, t, x, step_fn)
+
+    def _iterate(self, y, x0, A_tensor, gamma_value, theta_value, t):
+        """Run FISTA iterations with Nesterov momentum and return the solution."""
+        return self._iterate_accelerated(
+            y,
+            x0,
+            A_tensor,
+            t,
+            step_params_fn=lambda _k: (gamma_value, theta_value),
+        )
+
+
+class SFISTA(FISTA):
+    """
+    Step-size-learned FISTA variant inspired by Ablin et al.'s Step-LISTA.
+
+    This class is **not** the exact SLISTA architecture from "Learning step sizes
+    for unfolded sparse coding". Ablin et al.'s SLISTA unfolds ISTA with one
+    learned step size per layer and no acceleration:
+
+        z_{k+1} = ST(z_k - gamma_k A.T @ (A @ z_k - y), lambda * gamma_k)
+
+    This implementation keeps the learned per-layer step sizes and tied
+    thresholds from SLISTA, but deliberately adapts the architecture by:
+
+        - applying the update to the FISTA momentum variable;
+        - using the standard FISTA/Nesterov momentum recurrence;
+        - defaulting to positive shrinkage when ``positive=True``, i.e.
+          ``max(x - theta, 0)``, which enforces non-negative coefficients rather
+          than the signed soft-thresholding used in the paper.
+
+    It therefore solves an unfolded, momentum-accelerated, optionally
+    non-negative sparse-coding variant of:
+
+        min_x 1/2 ||y - A x||_2^2 + λ ||x||_1
+
+    At iteration ``k``, ``gamma[k]`` is a trainable scalar step size and the
+    threshold is computed as ``theta_k = lam * gamma[k]``. The step parameters
+    are stored directly and are not positivity-constrained by this class; callers
+    should initialize/train them accordingly if positive steps are required.
+
+    Args:
+        n_iterations (int): number of iterations/layers (trainable gamma parameters)
+        gamma_init (float | None): initialization value for gamma parameters.
+            Must be provided (default: None, which will raise an error if not set).
+        norm_A (bool): if True, normalize the columns of ``A`` (inherited from FISTA)
+        positive (bool): if True, enforces non-negativity on the solution (default).
+            If False, uses signed soft-thresholding as in SLISTA.
+        ls_mode (str): least-squares mode, either ``"ls"`` or ``"tls"`` (inherited from FISTA)
+        callbacks (list | None): optional solver callbacks (inherited from FISTA)
+    """
+
+    def __init__(
+        self,
+        n_iterations,
+        gamma_init=None,
+        norm_A=True,
+        positive=True,
+        ls_mode="ls",
+        callbacks=None,
+    ):
+        super().__init__(
+            norm_A=norm_A,
+            positive=positive,
+            ls_mode=ls_mode,
+            callbacks=callbacks,
+        )
+        if n_iterations <= 0:
+            raise ValueError(f"n_iterations must be positive, got {n_iterations}")
+        if gamma_init is None:
+            raise ValueError("gamma_init must be provided for SFISTA")
+        self.n_iterations = n_iterations
+        self.gamma = nn.Parameter(torch.full((n_iterations,), float(gamma_init)))
+        # Temporary storage for lam_value during forward pass
+        self._current_lam_value = None
+
+    def _setup_forward(self, y, x0, A, lam, gamma):
+        """Prepare inputs and validate SFISTA-specific constraints.
+        
+        Validates that gamma is not passed (SFISTA manages its own gamma parameters)
+        and handles device/dtype for the trainable gamma.
+        """
+        if gamma is not None:
+            raise ValueError(
+                "SFISTA manages its own gamma parameters; "
+                "do not pass gamma to forward()"
             )
 
-            # Nesterov momentum update
-            tk, z, x = self._nesterov_momentum(tk, x, x_next)
+        y, x0, A_tensor, l2_norms, batch_size = self._prepare_forward_inputs(y, x0, A)
+        self._current_lam_value = self._resolve_lam_value(
+            lam,
+            batch_size,
+            A_tensor,
+            missing_message="lam must be provided",
+        )
 
-            if callbacks:
-                for cb in callbacks:
-                    cb.on_step_end(
-                        self, x, gamma=gamma_value, theta=theta_value,
-                        A=A_tensor, y=y
-                    )
-            if self.stop:
-                break
+        # Ensure gamma is on the same device and dtype as A_tensor
+        if self.gamma.device != A_tensor.device or self.gamma.dtype != A_tensor.dtype:
+            self.gamma.data = self.gamma.data.to(
+                device=A_tensor.device,
+                dtype=A_tensor.dtype,
+            )
 
-        return x
+        # Return dummy values for gamma_value and theta_value (not used by SFISTA)
+        return y, x0, A_tensor, l2_norms, None, None
+
+    def _step_params(self, k):
+        """Return SFISTA trainable step size and matching threshold."""
+        gamma_k = self.gamma[k]
+        theta_k = self._current_lam_value * gamma_k
+        return gamma_k, theta_k
+
+    def _iterate(self, y, x0, A_tensor, gamma_value, theta_value, t):
+        """Run SFISTA iterations with trainable per-iteration step sizes.
+        
+        Uses gamma[k] at iteration k and computes theta_k = lam * gamma[k].
+        """
+        if t > self.n_iterations:
+            raise ValueError(
+                f"t ({t}) cannot exceed n_iterations ({self.n_iterations})"
+            )
+
+        return self._iterate_accelerated(
+            y,
+            x0,
+            A_tensor,
+            t,
+            step_params_fn=self._step_params,
+        )

@@ -1,9 +1,9 @@
 """Optimization algorithms module.
 
-Includes ISTA, FISTA, and callback infrastructure for sparse recovery algorithms.
+Includes ISTA, FISTA, SFISTA, and callback infrastructure for sparse recovery algorithms.
 """
 
-from .ista import FISTA, ISTA
+from .ista import FISTA, ISTA, SFISTA
 from .callbacks import (
     IterationCallback,
     SolutionChangeStopper,
@@ -14,6 +14,7 @@ from .callbacks import (
 __all__ = [
     "ISTA",
     "FISTA",
+    "SFISTA",
     "IterationCallback",
     "SolutionChangeStopper",
     "StepParamCollector",

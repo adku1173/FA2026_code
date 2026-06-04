@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "numpy",
     "acoular",
+    "ipykernel",
 ]
 
 [project.optional-dependencies]

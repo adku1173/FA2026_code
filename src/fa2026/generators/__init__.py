@@ -8,12 +8,12 @@ from .generator import CMFDataGenerator
 # Optional imports - only available if the respective frameworks are installed
 try:
     from .generator_torch import CMFTorchDataset
-except ImportError:
+except Exception:
     CMFTorchDataset = None
 
 try:
     from .generator_tf import make_tf_dataset
-except ImportError:
+except Exception:
     make_tf_dataset = None
 
 __all__ = ["CMFDataGenerator", "CMFTorchDataset", "make_tf_dataset"]
